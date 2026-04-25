@@ -945,19 +945,7 @@ def chat(query: str, history: list[dict]) -> tuple[str, list[dict]]:
 
 def route_query(question: str) -> dict:
     """
-    Use Groq to decide which databases are relevant to answer a question,
-    then query each relevant database and return a combined result.
-
-    Returns a dict with keys:
-        "databases_used": list of DB names queried
-        "reasoning":      Groq's explanation of routing decisions
-        "results":        dict mapping DB name to its result string
-        "synthesis":      Groq's final synthesised answer
-
-    Teaching note: this is the highest-level RAG pattern in the app.
-    Groq is used TWICE — once as a router (deciding which DBs to query)
-    and once as a synthesiser (combining results into a coherent answer).
-    The reasoning trace makes both decisions visible to students.
+    Decide which databases to query and synthesise a unified answer.
     """
     llm = get_llm()
 
@@ -965,11 +953,14 @@ def route_query(question: str) -> dict:
     connection_status = check_all_connections()
     connected_dbs = [db for db, s in connection_status.items() if s["ok"]]
 
+    # FIX: Pull the list formatting OUT of the f-string for Python 3.11
+    db_list_str = "\n".join([f"- {db}" for db in connected_dbs])
+
     routing_prompt = f"""You are a data routing expert. Given a question and a list of available databases,
 decide which databases should be queried to best answer the question.
 
 Available databases (only connected ones):
-{chr(10).join(f"- {db}" for db in connected_dbs)}
+{db_list_str}
 
 Database roles:
 - postgres: structured relational data, records, transactions, reporting
@@ -1050,25 +1041,33 @@ Return ONLY the JSON. No explanation, no markdown."""
             results["neo4j"] = f"Query error: {e}"
 
     # Step 3 — Synthesise results into a final answer
+    synthesis = "No data found to answer the question."
     if results:
-        synthesis_prompt = f"""You are a data analyst. Synthesise the following database results
-into a single, coherent answer to the user's question.
+        # FIX: Move synthesis formatting logic outside the f-string
+        db_content_list = []
+        for db, result in results.items():
+            db_content_list.append(f"=== {db.upper()} ===\n{result}")
+        
+        all_db_results = "\n\n".join(db_content_list)
 
-Question: {question}
+        # CORRECTED: Using 'question' instead of 'query'
+        synthesis_prompt = f"""
+        You are a helpful AI assistant for Install.AI, a DFW-based renovation platform.
+        Using the database results below, answer the user's question.
+        
+        DATABASE SEARCH RESULTS:
+        {all_db_results}
 
-Database results:
-{chr(10).join([f"=== {db.upper()} ===\n{result}" for db, result in results.items()])}
+        USER QUESTION: {question}
 
-Rules:
-- Provide a direct, factual answer drawing from all available results.
-- Mention which databases contributed to your answer.
-- If results conflict, note the discrepancy.
-- Be concise and professional."""
+        INSTRUCTIONS:
+        - Use ONLY the provided data.
+        - If matching a contractor, mention their rating and city.
+        - Be concise and professional.
+        """
 
         synthesis_response = llm.invoke([HumanMessage(content=synthesis_prompt)])
         synthesis = synthesis_response.content
-    else:
-        synthesis = "No connected databases could be queried for this question."
 
     return {
         "databases_used": dbs_to_query,
@@ -1076,8 +1075,7 @@ Rules:
         "results":        results,
         "synthesis":      synthesis,
     }
-
-
+    
 # ── 11. STREAMLIT UI ──────────────────────────────────────────────────────────
 
 def init_session_state():
